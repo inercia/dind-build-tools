@@ -1,0 +1,15 @@
+
+FROM docker:dind
+
+RUN apk add bash make curl git ncurses jq grep coreutils docker docker-compose gettext go rsync && \
+    apk add yq --repository=http://dl-cdn.alpinelinux.org/alpine/edge/community # yq v4
+
+WORKDIR /workspace
+
+ENV HOME=/workspace
+ENV PATH=/root/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ENV TOP_DIR=/workspace
+
+COPY Makefile      /workspace/Makefile
+
+# do all your copies here, and setup the environment for running stuff

@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+#shellcheck disable=2086
+
+this_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+[ -d "$this_dir" ] || {
+	echo "FATAL: no current dir (maybe running in zsh?)"
+	exit 1
+}
+COMMON_FILE=$this_dir/common.sh
+
+source "$COMMON_FILE"
+
+set -o pipefail
+
+#################################################################################
+
+if [ -n "$JENKINS_HOME" ]; then
+    UNIQUE_SUFFIX=${GIT_COMMIT}-${BUILD_NUMBER}
+else
+    UNIQUE_SUFFIX="build"
+fi
+
+# the image we are building
+CONT_IMAGE_NAME="${CONT_IMAGE_NAME:-dind-runner-job:latest}"
+CACHE_REGISTRY="${CACHE_REGISTRY:-}"
+
+# the container we are running
+CONT_NAME="${CONT_NAME:-}"
+CONT_NAME_GEN_BASE="${CONT_NAME_GEN_BASE:-dind-runner-job}"
+
+# directory inside of the container where the HOME is.
+# IMPORTANT: must match the one in the Dockerfile.
+CONT_HOME="/workspace"
+
+CONT_DELAY=2
+[ -n "$JENKINS_HOME" ] && CONT_DELAY=10
+
+# Docker config file in the host
+DOCKER_CONFIG=${DOCKER_CONFIG:-$HOME/.docker}
+
+# directory for output, logs... files
+OUTPUT_DIR="${OUTPUT_DIR:-}"
+if [ -z "$OUTPUT_DIR" ]; then
+	if [ -n "$JENKINS_HOME" ]; then
+		OUTPUT_DIR="/tmp/outputs-${UNIQUE_SUFFIX}"
+	else
+		OUTPUT_DIR="/tmp"
+	fi
+fi
+
+DOCKER_BUILD_EXTRA_ARGS=${DOCKER_BUILD_EXTRA_ARGS:-}
+DOCKER_RUN_EXTRA_ARGS=${DOCKER_RUN_EXTRA_ARGS:-}
+DOCKER_EXEC_EXTRA_ARGS=${DOCKER_EXEC_EXTRA_ARGS:-}
+
+# extra arguments to pass to `docker run`
+DOCKER_RUN_EXTRA_ARGS+=(
+	"--add-host registry.localhost:127.0.0.1"
+)
+
+# directory in the container where th top dir. is mounted
+CONT_TOP_DIR="$CONT_HOME/src"
+
+# environment variables to pass to "docker run"
+CONT_ENV_VARS=(
+	BRANCH_NAME
+	BUILD_NUMBER
+	CACHE_REGISTRY
+	CI
+	DOCKER_PASSWORD
+	DOCKER_USERNAME
+	GIT_COMMIT
+	GIT_COMMIT
+	HOST_USER_ID=$(id -u)
+	TERM
+	TEST
+	VERBOSE
+)
+
+# mounts in the DinD container
+CONT_MOUNTS=(
+	"$OUTPUT_DIR/logs":"$CONT_HOME/logs"
+)
+
+# chown some directories (in the DinD container) after any DinD command
+CHOWN_UID=${CHOWN_UID:-$(id -u)}
+CHOWN_DIRS=(
+	"$CONT_HOME/logs"
+)
+
+# directories/files to remove when the DinD container is destroyed
+CLEANUP=()
