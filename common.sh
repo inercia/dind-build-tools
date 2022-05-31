@@ -110,5 +110,8 @@ kill_background() {
 #######################################################################################################################
 
 image_id() {
-	docker inspect --format "{{.Id}}" $1 2>/dev/null
+	local image=$1
+	shift || abort "${FUNCNAME[0]} usage error"
+
+	docker inspect --format "{{.Id}}" "$image" 2>/dev/null
 }

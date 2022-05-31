@@ -32,6 +32,9 @@ CONT_DELETE=${CONT_DELETE:-}
 # the Dockefile to use for the DinD
 DOCKERFILE="${DOCKERFILE:-$TOP_DIR/Dockerfile.ci}"
 
+# timeout for waits
+WAIT_TIMEOUT=30
+
 # at-exit handlers
 ATEXIT=()
 
@@ -39,14 +42,14 @@ ATEXIT=()
 
 # handler for exit functions
 # exit functions are evaluated in reverse order to their registration
-function atexit_handler() {
+function _atexit_handler() {
 	local EXPR
 	for EXPR in "${ATEXIT[@]}"; do
 		eval "$EXPR" || true
 	done
 }
 
-trap atexit_handler EXIT
+trap _atexit_handler EXIT
 
 function atexit() {
 	local EXPR
@@ -131,43 +134,84 @@ fi
 
 function cont_status() {
 	local cont_name="$1"
+	shift || abort "${FUNCNAME[0]} usage error"
+
 	docker container inspect -f '{{.State.Status}}' $cont_name 2>/dev/null
 }
 
 function cont_running() {
 	local cont_name="$1"
+	shift || abort "${FUNCNAME[0]} usage error"
+
 	local state="$(cont_status $cont_name)"
 	[ -n "$VERBOSE" ] && info "(current state of DinD: '$state')"
 	test "$state" = "running"
 }
 
+function cont_wait_running() {
+	local cont_name="$1"
+	shift || abort "${FUNCNAME[0]} usage error"
+
+	count=0
+	while [ $count -lt $WAIT_TIMEOUT ] && ! cont_running "$cont_name"; do
+		sleep 1
+		info "... waiting"
+		count=$((count + 1))
+	done
+	cont_running "$cont_name"
+}
+
+function cont_wait_not_running() {
+	local cont_name="$1"
+	shift || abort "${FUNCNAME[0]} usage error"
+
+	count=0
+	while [ $count -lt $WAIT_TIMEOUT ] && cont_running "$cont_name"; do
+		sleep 1
+		info "... waiting"
+		count=$((count + 1))
+	done
+	! cont_running "$cont_name"
+}
+
 function cont_stop() {
 	local cont_name="$1"
+	shift || abort "${FUNCNAME[0]} usage error"
+
 	if cont_running "$cont_name"; then
 		timeout=$((CONT_DELAY - 1))
 		info "Stopping container '$cont_name' (with timeout $timeout)..."
 		docker stop --time $timeout "$cont_name" ||
 			docker kill "$cont_name" ||
 			warn "could not stop $cont_name"
+
+		info "Waiting until '$cont_name' is stopped..."
+		cont_wait_not_running "$cont_name" || abort "$cont_name is still running"
 		docker rm "$cont_name" 2>/dev/null || info "$cont_name is not present"
+		passed "... DinD '$cont_name' is stopped"
 	fi
 }
 
 function cont_mounts() {
 	local cont="$1"
+	shift || abort "${FUNCNAME[0]} usage error"
+
 	docker inspect -f '{{range .Mounts}}{{.Source}}:{{.Destination}} {{end}}' "$cont"
 }
 
 function cont_has_mount() {
 	local cont=$1
-	local mount=$2
+	shift || abort "${FUNCNAME[0]} usage error"
+	local mount=$1
+	shift || abort "${FUNCNAME[0]} usage error"
+
 	IFS=', ' read -r -a arr <<<"$(cont_mounts $cont)"
 	[[ " ${arr[*]} " =~ " ${mount} " ]]
 }
 
 function cont_has_mounts() {
 	local cont=$1
-	shift
+	shift || abort "${FUNCNAME[0]} usage error"
 	local mounts=("$@")
 
 	info "Checking $cont has the expected mounts..."
@@ -193,13 +237,17 @@ function file_different() {
 
 function docker_config_has_auth() {
 	local docker_config="$1"
+	shift || abort "${FUNCNAME[0]} usage error"
 
 	[ "null" != "$(jq '.auths["docker-hub-remote.dr-uw2.adobeitc.com"].auth' "${docker_config}")" ]
 }
 
 function copy_docker_config() {
 	local docker_config="$1"
-	local local_docker_config="$2"
+	shift || abort "${FUNCNAME[0]} usage error"
+	local local_docker_config="$1"
+	shift || abort "${FUNCNAME[0]} usage error"
+
 	local local_docker_config_tmp="${local_docker_config}.tmp"
 
 	if [ -f "$docker_config" ]; then
@@ -266,6 +314,12 @@ dind_start_time=$(date +%s)
 info "Starting DinD for running: ${ARGS[*]}"
 
 info "- TOP_DIR: $TOP_DIR"
+if [ -n "$CONT_TOP_DIR" ]; then
+	info "- ... mounting in container: $TOP_DIR -> $CONT_TOP_DIR"
+	CONT_MOUNTS+=("$TOP_DIR":"$CONT_TOP_DIR")
+	CONT_ENV_VARS+=(TOP_DIR="$CONT_TOP_DIR")
+fi
+
 info "- Dockerfile: $DOCKERFILE"
 info "- container name: $CONT_NAME"
 if [ -n "$OUTPUT_DIR" ]; then
@@ -322,13 +376,7 @@ if [ -z "$DIND_READY" ]; then
 		$DOCKER_BUILD_CACHE_ARGS \
 		--build-arg CLUSTER_PROVIDER="$CLUSTER_PROVIDER" \
 		-f "$DOCKERFILE" "$TOP_DIR" || abort "could not build image"
-	new_id=$(image_id)
-
-	if [ -n "${CACHE_REGISTRY:-}" ]; then
-		info "Pushing build cache to $CACHE_REGISTRY/$CONT_IMAGE_NAME"
-		docker tag "$CONT_IMAGE_NAME" "$CACHE_REGISTRY/$CONT_IMAGE_NAME" || abort "could not tag image as $CACHE_REGISTRY/$CONT_IMAGE_NAME"
-		docker push "$CACHE_REGISTRY/$CONT_IMAGE_NAME" || abort "could not push image $CACHE_REGISTRY/$CONT_IMAGE_NAME"
-	fi
+	new_id=$(image_id $CONT_IMAGE_NAME)
 
 	if [ "$prev_id" != "$new_id" ]; then
 		info "Image has changed: stopping previous container"
@@ -336,6 +384,17 @@ if [ -z "$DIND_READY" ]; then
 		sleep $CONT_DELAY
 	else
 		info "Image has not changed ($new_id)"
+	fi
+
+	if [ -n "${CACHE_REGISTRY:-}" ]; then
+		# push to the build cache, but only if this is the first build or the build has changed
+		if [ -z "$prev_id" ] || [ "$prev_id" != "$new_id" ]; then
+			info "Pushing build cache to $CACHE_REGISTRY/$CONT_IMAGE_NAME"
+			info "- previous image ID: $prev_id"
+			info "- new image ID:      $new_id"
+			docker tag "$CONT_IMAGE_NAME" "$CACHE_REGISTRY/$CONT_IMAGE_NAME" || abort "could not tag image as $CACHE_REGISTRY/$CONT_IMAGE_NAME"
+			docker push "$CACHE_REGISTRY/$CONT_IMAGE_NAME" || abort "could not push image $CACHE_REGISTRY/$CONT_IMAGE_NAME"
+		fi
 	fi
 fi
 
@@ -354,8 +413,7 @@ else
 		CLEANUP+=("$local_docker_config")
 
 		CONT_MOUNTS+=("$local_docker_config:$CONT_HOME/.docker/config.json")
-		DOCKER_EXEC_EXTRA_ARGS+=("-e DOCKER_CONFIG=$CONT_HOME/.docker")
-		DOCKER_RUN_EXTRA_ARGS+=("-e DOCKER_CONFIG=$CONT_HOME/.docker")
+		CONT_ENV_VARS+=("DOCKER_CONFIG=$CONT_HOME/.docker")
 	fi
 	if [ -e "${HOME}/.ssh" ]; then
 		info "Adding .ssh config directory..."
@@ -416,6 +474,12 @@ else
 			CONT_MOUNTS_ARGS+=("-v $v")
 		done
 
+		DOCKER_RUN_ENV_VARS_ARGS=()
+		for v in "${CONT_ENV_VARS[@]}"; do
+			info "- passing env. var. (as default): $v"
+			DOCKER_RUN_ENV_VARS_ARGS+=("-e $v")
+		done
+
 		[ -n "$DEBUG" ] && set -x
 		docker run \
 			--rm \
@@ -423,18 +487,19 @@ else
 			--name "$CONT_NAME" \
 			-v "$TOP_DIR":$CONT_TOP_DIR \
 			${CONT_MOUNTS_ARGS[*]} \
+			${DOCKER_RUN_ENV_VARS_ARGS[*]} \
 			${DOCKER_RUN_EXTRA_ARGS[*]} \
 			"$CONT_IMAGE_NAME"
 		rc=$?
 		[ -n "$DEBUG" ] && set +x
-		[ $rc -eq 0 ] || {
-			# check again if the container was really not running
-			if ! cont_running "$CONT_NAME"; then
-				info "container status: $(cont_status $CONT_NAME)"
-				abort "could not start $CONT_NAME"
-			fi
+		[ $rc -eq 0 ] || warn "waybe the DinD container is not running"
+
+		info "Waiting until $CONT_NAME is running..."
+		cont_wait_running "$CONT_NAME" || {
+			info "container status: $(cont_status $CONT_NAME)"
+			abort "could not start $CONT_NAME"
 		}
-		passed "... DinD container running"
+		passed "... DinD container '$CONT_NAME' is running (in the background)"
 
 		# give some time docker to start...
 		sleep $CONT_DELAY
@@ -442,11 +507,12 @@ else
 
 fi
 
+hl
 info "Running '${ARGS[*]}' in the '$CONT_NAME' container"
 
 DOCKER_EXEC_ENV_VARS_ARGS=()
 for v in "${CONT_ENV_VARS[@]}"; do
-	info "- passing env. var: $v"
+	info "- passing env. var (overridding): $v"
 	DOCKER_EXEC_ENV_VARS_ARGS+=("-e $v")
 done
 
