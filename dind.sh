@@ -372,14 +372,16 @@ if [ -z "$DIND_READY" ]; then
 	fi
 
 	info "Rebuilding '$CONT_IMAGE_NAME' image from '$DOCKERFILE'"
+	[ -n "$DEBUG" ] && set -x
 	docker build -t "$CONT_IMAGE_NAME" \
 		$DOCKER_BUILD_CACHE_ARGS \
 		--build-arg CLUSTER_PROVIDER="$CLUSTER_PROVIDER" \
 		-f "$DOCKERFILE" "$TOP_DIR" || abort "could not build image"
+	[ -n "$DEBUG" ] && set +x
 	new_id=$(image_id $CONT_IMAGE_NAME)
 
 	if [ "$prev_id" != "$new_id" ]; then
-		info "Image has changed: stopping previous container"
+		info "Image has changed from $prev_id to $new_id: stopping previous container"
 		cont_stop "$CONT_NAME"
 		sleep $CONT_DELAY
 	else
