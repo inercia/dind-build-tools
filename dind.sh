@@ -97,9 +97,7 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
-if [ ${#ARGS[@]} -eq 0 ]; then
-	exit 0
-fi
+# [ ${#ARGS[@]} -gt 0 ] || abort "no arguments provided"
 
 [ -n "$CONFIG" ] || abort "not config provided with --config"
 [ -e "$CONFIG" ] || abort "'$CONFIG' not found."
@@ -256,6 +254,7 @@ function copy_docker_config() {
 
 		info "Adding Docker authentication file for using inside DinD:"
 		info " - $local_docker_config -> $CONT_HOME/.docker/config.json"
+		touch "$local_docker_config"
 
 		docker_config_has_auth "$docker_config" || {
 			warn "No registry credentials found in ${docker_config}, using the MacOS keychain?."
