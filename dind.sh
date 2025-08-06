@@ -185,7 +185,10 @@ function cont_stop() {
 
 		info "Waiting until '$cont_name' is stopped..."
 		cont_wait_not_running "$cont_name" || abort "$cont_name is still running"
-		docker rm "$cont_name" 2>/dev/null || info "$cont_name is not present"
+		local output
+		if ! output=$(docker rm "$cont_name" 2>&1); then
+			warn "'$cont_name' is not present: $output"
+		fi
 		passed "... DinD '$cont_name' is stopped"
 	fi
 }
@@ -493,7 +496,7 @@ else
 			"$CONT_IMAGE_NAME"
 		rc=$?
 		[ -n "$DEBUG" ] && set +x
-		[ $rc -eq 0 ] || warn "waybe the DinD container is not running"
+		[ $rc -eq 0 ] || warn "maybe the DinD container is not running"
 
 		info "Waiting until $CONT_NAME is running..."
 		cont_wait_running "$CONT_NAME" || {
